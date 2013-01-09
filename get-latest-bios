@@ -1,0 +1,201 @@
+#!/bin/sh -efu
+# BIOS downloader
+#
+# Copyright (c) 2012 Yury Konovalov <YKonovalov@gmail.com>
+#
+# License: GPLv2 or later
+
+PROG="${PROG:-${0##*/}}"
+MDIR="modules"
+source $MDIR/common.sh
+
+temp_dir=
+debug=
+METHOD=
+METHOD_REQS=
+MODULES=
+
+source_modules(){
+    for m in $(find "$MDIR" -type f -name "vendor-*.sh"); do
+	source $m
+    done
+}
+
+init_modules(){
+    source_modules
+    MODULES="$(set |sed -n "s/^BIOS_DOWNLOAD_METHODREQS_\([^=]\+\)=/\1:/p"|tr -d \'|tr '[:upper:]' '[:lower:]')" #"
+    MODULES_ARGS="$(echo "$MODULES" |awk -F: '{$1="";print}'|tr '| ' '\n'|sort -u|grep -v '^$')"
+    MODULES_VARS="$(echo "$MODULES_ARGS" |tr '-' '_')"
+    MODULES_PARAMS="$(echo $(echo "$MODULES_ARGS"|sed "s/$/:/")|tr ' ' ',')"
+    debug "$MODULES_ARGS"
+    debug "$MODULES_PARAMS"
+}
+
+init_modules_vars(){
+    for var in $MODULES_VARS; do
+	eval "$var="
+    done
+}
+
+setup_vendor(){
+    VENDOR=${vendor:-$(cat /sys/class/dmi/id/sys_vendor || sudo dmidecode -s system-manufacturer)}
+}
+
+find_willing_module(){
+    source_modules
+    DETECTED="$(set |grep "^BIOS_DOWNLOAD_METHOD_[^=]\+"||true)"
+    METHODS_COUNT=$(echo "$DETECTED"|grep -v "^$"|wc -l)
+    case $METHODS_COUNT in
+	0)
+	    doexit 1 "Vendor $VENDOR is not supported yet."
+	    ;;
+	1)
+	    info "System vendor: $VENDOR"
+	    METHOD="$(echo "$DETECTED"|sed -n "s/^BIOS_DOWNLOAD_METHOD_.*=/METHOD=/p")"
+	    eval $METHOD
+	    MODULE="$(echo "$DETECTED"|sed -n "s/^BIOS_DOWNLOAD_METHOD_\([^=]\+\)=.*/\1/p"|tr '[:upper:]' '[:lower:]')" #"
+	    debug "System module: $MODULE"
+	    ;;
+	*)
+	    doexit 2 "Vendor $VENDOR is supported by several modules. This is a bug."
+	    ;;
+    esac
+
+    METHOD_REQS="$(echo "$MODULES"|awk -F: -v module="$MODULE" '{if($1==module){$1=""; print}}')"
+    debug "Download module requires: $METHOD_REQS"
+    METHOD="$(echo "$METHOD"|sed -n "s/\(^[^[:blank:]]\+\).*/\1/p")" #"
+}
+
+usage() {
+    if [ -z "$1" ]; then
+	echo
+	echo "Usage: $PROG [--vendor <system maker name>] [--biosver <specific version>] [--list] {vendor specific keys...} [--verbose] [--debug] [--help]" >&2
+	(
+	echo
+	echo "Examples:"
+	echo
+	echo " To download BIOS update package for this machine:"
+	echo "  $PROG"
+	echo
+	echo " To download BIOS update package for some other machine:"
+	echo "$MODULES"|while IFS=: read v p; do
+	    echo "  $PROG --vendor $v [$(echo $p|sed -e "s/^/--/" -e "s/|/|--/")]"
+	done
+	echo
+	) >&2
+    else
+	( echo; echo "Error: $1"; echo ) >&2
+    fi
+
+    exit 1
+}
+
+exit_handler()
+{
+    local rc="$?"
+    trap - EXIT
+
+    rm -rf -- "$temp_dir"
+    #rm -f -- "$temp_output"
+    exit $rc
+}
+
+
+trap exit_handler EXIT HUP PIPE INT QUIT TERM
+
+
+temp_dir="$(mktemp -td bios-updater.XXXXXX)"
+temp_output="$(mktemp -t bios-updater-file.XXXXXX)"
+
+## Find all vendors args
+init_modules
+
+TEMP=`getopt -n "$PROG" -o "qdhvf" -l "help,debug,verbose,quiet,force,output-dir:,vendor:,biosver:,list,$MODULES_PARAMS" -- "$@"` || usage ""
+eval set -- "$TEMP"
+
+output_dir="$(readlink -ve $(pwd))"
+operation=
+method=
+vendor_specified=
+
+debug=
+info=
+quiet=
+force=
+list=
+output_dir="$HOME/bios"
+vendor=
+biosver=
+init_modules_vars
+
+while :; do
+    case "$1" in
+	-h|--help)
+	    usage ""
+	    ;;
+	-d|--debug)
+	    debug=1
+	    info=1
+	    ;;
+	-v|--verbose)
+	    info=1
+	    ;;
+	-q|--quiet)
+	    quiet=1
+	    debug=
+	    info=
+	    ;;
+	-f|--force)
+	    force=1
+	    ;;
+	-l|--list)
+	    list=1
+	    ;;
+	--output-dir)
+	    output_dir="$2"
+	    shift
+	    ;;
+	--vendor)
+	    vendor="$2"
+	    shift
+	    ;;
+	--biosver)
+	    biosver="$2"
+	    shift
+	    ;;
+	--)
+	    shift
+	    break
+	    ;;
+    esac
+    sarg=$(echo "$1"|sed "s/^--//")
+    if echo "$MODULES_ARGS"|grep "^$sarg$" >/dev/null; then
+	var=$(echo "$sarg"|tr '-' '_')
+	eval "$var='$2'"
+	shift
+    fi
+    shift
+done
+[ -z "$vendor" ] || vendor_specified=1
+setup_vendor
+find_willing_module
+# Checking active module requirements
+for req in $METHOD_REQS; do
+    req_value=
+    for reqo in $(echo $req|tr '|' ' '); do
+	optname="$(echo $reqo|tr '[:upper:]' '[:lower:]')"
+	varname="$(echo "$optname"|tr '-' '_')"
+	req_value=$(eval 'echo $'$varname)
+	if [ -n "$req_value" ]; then
+	    # We got one of the required args.
+	    break
+	fi
+    done
+    if [ -z "$req_value" ] && [ -n "$vendor_specified" ]; then
+	options_reqs="$(echo $req|tr '[:upper:]' '[:lower:]'|sed -e "s/[^|]\+/--&/g" -e "s/|/ or /g")"
+	usage "Not enough arguments. Please specify $options_reqs"
+    fi
+done
+
+debug "Calling $METHOD"
+$METHOD

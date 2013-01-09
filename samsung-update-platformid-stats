@@ -1,0 +1,57 @@
+#!/bin/sh
+###
+## Here we calculate some stats like following:
+# count| platformID chars | BIOS version chars | Version to platform convertion
+# 506  | 2                | 4                  | normal
+# 264  | 3                | 6                  | normal
+# 36   | 3                | 4                  | zerohack
+# Others are some kind of special cases which may not even exist in real hardware.
+
+WDIR="$HOME/bios-update"
+
+XML_URL="http://sbuservice.samsungmobile.com/BUWebServiceProc.asmx/BIOSItemList"
+
+PROG="${PROG:-${0##*/}}"
+XML="$WDIR/$PROG-BIOSItemList.xml"
+RAWTXT="$WDIR/$PROG-BIOSItemList-All.txt"
+TXT="$WDIR/$PROG-BIOSItemList-Active.txt"
+STATS="$WDIR/Samsung-PlatformID-stats.txt"
+
+
+[ -d "$WDIR" ] || mkdir -p "$WDIR" || (echo "Could not create $WDIR"; exit 1)
+
+[ -f "$XML" ] || (
+    echo "Getting $XML_URL to $XML"
+    curl "$XML_URL" | tr -d '\r'| \
+	sed -e 's/<BIOS_LIST.*>/<BIOS_LIST>/' > "$XML"
+)
+
+[ -f "$RAWTXT" ] || (
+    echo "Processing $XML"
+    xmlstarlet sel -t \
+	-m '/BIOS_LIST/ItemList/BIOS_ITEM' \
+	-v 'concat(Platform_ID," ",Version," ",Publish_State)' \
+	-n "$XML" > "$RAWTXT"
+)
+
+[ -f "$TXT" ] || (
+    echo "Processing $RAWTXT to remove canceled records."
+    F="$(echo $(awk '{if($3=="Cancel")print $1"[[:blank:]]"$2}' "$RAWTXT")|sed -e "s/ /\\\|/g")"
+    grep -v "^\($F\)" "$RAWTXT" > "$TXT"
+)
+
+#cat "$TXT" |awk '{if($3=="Published")print length($1)" "length($2)}'|sort|uniq -c|sort -r -n -k1 |tee PlatformID-stats.txt
+
+echo "Processing $TXT into $STATS"
+awk '{
+if($3=="Published"){
+    p=length($1); b=length($2);
+    printf "%s	%s	",p,b;
+    if($2~".*"$1)print "normal";
+    else {
+	hacked=$1
+	sub(/^0/,"",hacked)
+	if($2~"0.*"hacked)print "zerohack";
+	else printf "special	%s	%s\n",$1,$2 }
+    }
+}' "$TXT"|sort|uniq -c|sort -r -n -k1| tee "$STATS"

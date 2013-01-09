@@ -1,0 +1,82 @@
+#!/bin/sh -efu
+# SAMSUNG PlatformID calc
+#
+# Copyright (c) 2012 Yury Konovalov <YKonovalov@gmail.com>
+#
+# License: GPLv2 or later
+
+PROG="${PROG:-${0##*/}}"
+MDIR="modules"
+source $MDIR/common.sh
+source $MDIR/vendor-samsung.sh
+
+usage() {
+    if [ -z "$1" ]; then
+	echo
+	echo "Usage: $PROG [--current-bios-version [--verbose] [--debug] [--help]" >&2
+	(
+	echo
+	echo "Examples:"
+	echo
+	echo " To download BIOS update package for this machine:"
+	echo "  $PROG" --current-bios-version P09AAH.012765.6780
+	echo
+	) >&2
+    else
+	( echo; echo "Error: $1"; echo ) >&2
+    fi
+
+    exit 1
+}
+
+exit_handler()
+{
+    local rc="$?"
+    trap - EXIT
+
+    rm -rf -- "$temp_dir"
+    #rm -f -- "$temp_output"
+    exit $rc
+}
+
+
+trap exit_handler EXIT HUP PIPE INT QUIT TERM
+
+
+temp_dir="$(mktemp -td bios-updater.XXXXXX)"
+temp_output="$(mktemp -t bios-updater-file.XXXXXX)"
+
+TEMP=`getopt -n "$PROG" -o "dhv" -l "help,debug,verbose,current-bios-version:" -- "$@"` || usage ""
+eval set -- "$TEMP"
+
+current_bios_version=
+
+debug=
+info=
+quiet=
+
+while :; do
+    case "$1" in
+	-h|--help)
+	    usage ""
+	    ;;
+	-d|--debug)
+	    debug=1 info=1
+	    ;;
+	-v|--verbose)
+	    info=1
+	    ;;
+	--current-bios-version)
+	    current_bios_version="$2"
+	    shift
+	    ;;
+	--)
+	    shift
+	    break
+	    ;;
+    esac
+    shift
+done
+[ -z "$current_bios_version" ] && current_bios_version="$(cat /sys/class/dmi/id/bios_version || sudo dmidecode -s bios-version)"
+info "BIOS Version: $current_bios_version"
+get_platformid_by_bios_version
