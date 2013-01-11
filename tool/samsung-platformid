@@ -6,7 +6,7 @@
 # License: GPLv2 or later
 
 PROG="${PROG:-${0##*/}}"
-MDIR="modules"
+MDIR="../modules"
 source $MDIR/common.sh
 source $MDIR/vendor-samsung.sh
 
