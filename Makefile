@@ -1,3 +1,4 @@
+prefix        ?= /usr
 bindir        ?= $(prefix)/bin
 datadir       ?= $(prefix)/share/bios-downloader
 
